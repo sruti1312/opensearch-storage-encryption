@@ -333,15 +333,14 @@ public final class PoolBuilder {
 
         Pool<?> pool;
         if (byteBufferMode) {
-            long bbPoolSize = (long) (maxCacheBlocks * 1.10) * CACHE_BLOCK_SIZE;
-            ByteBufferPool bbPool = new ByteBufferPool(bbPoolSize, CACHE_BLOCK_SIZE);
-            long poolMaxBlocks = (long) (maxCacheBlocks * 1.10);
-            bbPool.warmUp(poolMaxBlocks);
+            ByteBufferPool bbPool = new ByteBufferPool(reservedPoolSizeInBytes, CACHE_BLOCK_SIZE);
+            bbPool.warmUp(maxBlocks);
             LOGGER
                 .info(
-                    "ByteBuffer mode enabled. Created ByteBufferPool: capacity={}blocks ({}MB), pre-provisioned={}",
-                    poolMaxBlocks,
-                    bbPoolSize / (1024 * 1024),
+                    "ByteBuffer mode enabled. Created ByteBufferPool: capacity={}blocks ({}MB), cache={}blocks, pre-provisioned={}",
+                    maxBlocks,
+                    reservedPoolSizeInBytes / (1024 * 1024),
+                    maxCacheBlocks,
                     bbPool.getTotalProvisioned()
                 );
             pool = bbPool;
