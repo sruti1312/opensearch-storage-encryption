@@ -49,6 +49,9 @@ public class ByteBufferPool extends AbstractPool<RefCountedByteBuffer> {
         super(totalMemory, segmentSize);
     }
 
+    private static final int MAX_RETRY_ATTEMPTS = 10;
+    private static final long RETRY_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(50);
+
     @Override
     public RefCountedByteBuffer acquire() throws InterruptedException {
         if (Thread.currentThread().isInterrupted()) {
@@ -64,8 +67,33 @@ public class ByteBufferPool extends AbstractPool<RefCountedByteBuffer> {
             return wrapAndRegister(buf);
         }
 
-        // Freelist empty — allocate new
-        LOGGER.debug("Freelist empty (provisioned={}, max={}), allocating new buffer", totalProvisioned.get(), maxSegments);
+        // Freelist empty — trigger GC and retry
+        for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+            requestGCIfNeeded();
+            java.util.concurrent.locks.LockSupport.parkNanos(RETRY_WAIT_NANOS * attempt);
+
+            buf = freeList.poll();
+            if (buf != null) {
+                buf.clear().order(ByteOrder.LITTLE_ENDIAN);
+                buffersInUse.incrementAndGet();
+                return wrapAndRegister(buf);
+            }
+
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("Thread interrupted while waiting for freelist");
+            }
+        }
+
+        // All retries exhausted — allocate new as last resort
+        LOGGER
+            .warn(
+                "Freelist empty after {} retries (provisioned={}, max={}, inUse={}, freeList={}), allocating new buffer",
+                MAX_RETRY_ATTEMPTS,
+                totalProvisioned.get(),
+                maxSegments,
+                buffersInUse.get(),
+                freeList.size()
+            );
         return allocateNewAndWrap();
     }
 
@@ -80,7 +108,31 @@ public class ByteBufferPool extends AbstractPool<RefCountedByteBuffer> {
             return wrapAndRegister(buf);
         }
 
-        LOGGER.debug("Freelist empty (provisioned={}, max={}), allocating for write path", totalProvisioned.get(), maxSegments);
+        // Freelist empty — trigger GC and retry with timeout
+        long deadlineNanos = System.nanoTime() + unit.toNanos(timeout);
+        for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+            requestGCIfNeeded();
+            java.util.concurrent.locks.LockSupport.parkNanos(RETRY_WAIT_NANOS * attempt);
+
+            buf = freeList.poll();
+            if (buf != null) {
+                buf.clear().order(ByteOrder.LITTLE_ENDIAN);
+                buffersInUse.incrementAndGet();
+                return wrapAndRegister(buf);
+            }
+
+            if (System.nanoTime() > deadlineNanos)
+                break;
+        }
+
+        LOGGER
+            .warn(
+                "Freelist empty after retries (provisioned={}, max={}, inUse={}, freeList={}), allocating for write path",
+                totalProvisioned.get(),
+                maxSegments,
+                buffersInUse.get(),
+                freeList.size()
+            );
         return allocateNewAndWrap();
     }
 
