@@ -120,14 +120,23 @@ public class CachedByteBufferIndexInput extends IndexInput implements RandomAcce
     private ByteBuffer getCacheBlockWithOffset(long pos) throws IOException {
         final long fileOffset = absoluteBaseOffset + pos;
         final long blockOffset = fileOffset & ~CACHE_BLOCK_MASK;
-        final int offsetInBlock = (int) (fileOffset - blockOffset);
+        lastOffsetInBlock = (int) (fileOffset - blockOffset);
 
+        // Fast path: reuse current block if still valid.
+        // Kept small so JIT can inline this into every read* caller.
         if (blockOffset == currentBlockOffset && currentBlock != null) {
-            lastOffsetInBlock = offsetInBlock;
             return currentBlock.value().buffer();
         }
+        return acquireCacheBlockOnMiss(blockOffset);
+    }
 
+    /**
+     * Slow path for cache block acquisition — separated to keep the fast path
+     * small enough for JIT inlining.
+     */
+    private ByteBuffer acquireCacheBlockOnMiss(long blockOffset) throws IOException {
         cacheHitHolder.reset();
+
         final BlockCacheValue<RefCountedByteBuffer> cacheValue = slotCache.acquireRefCountedValue(blockOffset, cacheHitHolder);
         if (cacheValue == null) {
             throw new IOException("Failed to acquire cache value for block at offset " + blockOffset);
@@ -141,7 +150,6 @@ public class CachedByteBufferIndexInput extends IndexInput implements RandomAcce
             readaheadContext.onAccess(blockOffset, cacheHitHolder.wasCacheHit());
         }
 
-        lastOffsetInBlock = offsetInBlock;
         return cacheValue.value().buffer();
     }
 
